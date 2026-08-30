@@ -1,5 +1,5 @@
 """
-TUGAS VISI KOMPUTER - PROJECT 2 - KELOMPOK 04
+TUGAS VISI KOMPUTER - PROJECT 2 - KELOMPOK 05
 ====================================================
 """
 
