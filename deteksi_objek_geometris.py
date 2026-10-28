@@ -20,12 +20,12 @@ MAX_LINES = 8
 # ------------------ LINGKARAN ------------------
 # Dibuat lebih ketat supaya tidak muncul banyak
 # lingkaran palsu seperti hasil sebelumnya.
-CIRCLE_MIN_RADIUS = 45
-CIRCLE_MAX_RADIUS = 80
-CIRCLE_MIN_DISTANCE = 80
+CIRCLE_MIN_RADIUS = 30
+CIRCLE_MAX_RADIUS = 90
+CIRCLE_MIN_DISTANCE = 70
 CIRCLE_PARAM1 = 100
-CIRCLE_PARAM2 = 70
-MAX_CIRCLES = 5
+CIRCLE_PARAM2 = 60
+MAX_CIRCLES = 8
 
 # -------------------- ELLIPSE -----------------
 ELLIPSE_MIN_AREA = 1500
@@ -144,7 +144,8 @@ def detect_lines(edges):
     data = []
 
     for line in lines:
-        x1, y1, x2, y2 = line[0]
+        line = np.asarray(line).reshape(-1)
+        x1, y1, x2, y2 = line[:4]
 
         panjang = np.sqrt(
             (x2 - x1) ** 2 +
@@ -159,7 +160,7 @@ def detect_lines(edges):
         )
 
         data.append(
-            (panjang, sudut, line[0])
+            (panjang, sudut, line[:4])
         )
 
     data.sort(
@@ -240,12 +241,10 @@ def detect_circles(gray):
     """
     Hough Circle Transform.
 
-    Rumus:
-
-        (x-a)^2 + (y-b)^2 = r^2
-
-    a,b = pusat
-    r   = jari-jari
+    Lingkaran dideteksi menggunakan:
+    1. Hough Circle Transform
+    2. Pemeriksaan edge pada keliling lingkaran
+    3. Pemeriksaan pemerataan edge di seluruh keliling
     """
 
     circles = cv2.HoughCircles(
@@ -262,12 +261,18 @@ def detect_circles(gray):
     if circles is None:
         return []
 
-    circles = np.round(
-        circles[0]
-    ).astype(int)
+    circles = np.asarray(circles)
 
-    # Edge untuk mengecek apakah kandidat
-    # benar-benar mengikuti bentuk lingkaran
+    if circles.ndim == 3:
+        circles = circles[0]
+
+    circles = np.round(
+        circles
+    ).astype(int).reshape(-1, 3)
+
+    # Edge digunakan untuk memeriksa
+    # apakah keliling kandidat benar-benar
+    # memiliki bentuk lingkaran.
     edges = cv2.Canny(
         gray,
         50,
@@ -278,8 +283,10 @@ def detect_circles(gray):
 
     for x, y, radius in circles:
 
-        # Membuat 360 titik di sepanjang
-        # keliling lingkaran
+        # ====================================================
+        # CEK EDGE DI SEPANJANG KELILING
+        # ====================================================
+
         angles = np.linspace(
             0,
             2 * np.pi,
@@ -288,6 +295,10 @@ def detect_circles(gray):
         )
 
         support = 0
+
+        # Membagi lingkaran menjadi 12 bagian.
+        # Setiap bagian harus mempunyai edge.
+        sector_support = [0] * 12
 
         for angle in angles:
 
@@ -302,7 +313,7 @@ def detect_circles(gray):
             found_edge = False
 
             # Cek area kecil di sekitar
-            # titik keliling
+            # titik keliling.
             for dx in range(-2, 3):
                 for dy in range(-2, 3):
 
@@ -323,23 +334,55 @@ def detect_circles(gray):
             if found_edge:
                 support += 1
 
-        # Persentase keliling yang mempunyai edge
+                # Tentukan bagian/sektor lingkaran.
+                sector = int(
+                    (angle % (2 * np.pi))
+                    / (2 * np.pi)
+                    * 12
+                )
+
+                if sector >= 12:
+                    sector = 11
+
+                sector_support[sector] += 1
+
+        # ====================================================
+        # FILTER 1: PERSENTASE EDGE
+        # ====================================================
+
         edge_score = support / len(angles)
 
-        # Filter bentuk lingkaran
-        if edge_score >= 0.35:
-            valid_circles.append(
-                (x, y, radius)
-            )
+        if edge_score < 0.45:
+            continue
+
+        # ====================================================
+        # FILTER 2: EDGE HARUS TERSEBAR
+        # ====================================================
+
+        # Minimal 9 dari 12 bagian lingkaran
+        # harus memiliki edge.
+        sektor_terisi = sum(
+            1 for nilai in sector_support
+            if nilai > 0
+        )
+
+        if sektor_terisi < 9:
+            continue
+
+        # ====================================================
+        # JIKA LOLOS SEMUA FILTER
+        # ====================================================
+
+        valid_circles.append(
+            (x, y, radius)
+        )
 
     return valid_circles[:MAX_CIRCLES]
-
 
 def draw_circles(result, circles):
 
     for x, y, radius in circles:
 
-        # Lingkaran hasil deteksi
         cv2.circle(
             result,
             (x, y),
@@ -348,17 +391,7 @@ def draw_circles(result, circles):
             3
         )
 
-        # Titik pusat
-        cv2.circle(
-            result,
-            (x, y),
-            4,
-            (0, 255, 0),
-            -1
-        )
-
     return len(circles)
-
 
 # ============================================================
 # DETEKSI ELLIPSE
@@ -366,44 +399,27 @@ def draw_circles(result, circles):
 
 def detect_ellipses(edges):
     """
-    Deteksi ellipse menggunakan contour + fitEllipse().
-
-    Persamaan dasar ellipse:
-
-        (x-a)^2 / rx^2 + (y-b)^2 / ry^2 = 1
-
-    a,b   = pusat ellipse
-    rx,ry = jari-jari sumbu ellipse
+    Mendeteksi bentuk ellipse berdasarkan contour.
     """
 
-    # --------------------------------------------------------
-    # Sambungkan bagian-bagian edge yang terputus
-    # --------------------------------------------------------
+    kernel = np.ones((5, 5), np.uint8)
 
-    kernel = np.ones((7, 7), np.uint8)
-
-    edges_closed = cv2.morphologyEx(
+    clean = cv2.morphologyEx(
         edges,
         cv2.MORPH_CLOSE,
         kernel,
         iterations=2
     )
 
-    # Sedikit mempertebal garis agar contour lebih mudah
-    # terbentuk.
-    edges_closed = cv2.dilate(
-        edges_closed,
-        np.ones((3, 3), np.uint8),
+    clean = cv2.dilate(
+        clean,
+        kernel,
         iterations=1
     )
 
-    # --------------------------------------------------------
-    # Cari contour
-    # --------------------------------------------------------
-
     contours, _ = cv2.findContours(
-        edges_closed,
-        cv2.RETR_LIST,
+        clean,
+        cv2.RETR_EXTERNAL,
         cv2.CHAIN_APPROX_NONE
     )
 
@@ -416,29 +432,37 @@ def detect_ellipses(edges):
 
         area = cv2.contourArea(contour)
 
-        # Filter berdasarkan luas
-        if area < 1500:
+        if area < ELLIPSE_MIN_AREA:
             continue
 
-        if area > 100000:
+        if area > ELLIPSE_MAX_AREA:
             continue
 
-        # ----------------------------------------------------
-        # Fit ellipse
-        # ----------------------------------------------------
+        x, y, w, h = cv2.boundingRect(contour)
 
-        ellipse = cv2.fitEllipse(contour)
+        if w < 70 or h < 40:
+            continue
+
+        if w * h < 3000:
+            continue
+
+        try:
+            ellipse = cv2.fitEllipse(contour)
+        except cv2.error:
+            continue
 
         (cx, cy), (width, height), angle = ellipse
 
         major = max(width, height)
         minor = min(width, height)
 
-        # Ukuran ellipse
-        if major < 140:
+        if major < 70:
             continue
 
         if major > 400:
+            continue
+
+        if minor <= 0:
             continue
 
         ratio = minor / major
@@ -449,130 +473,144 @@ def detect_ellipses(edges):
         if ratio > 0.85:
             continue
 
-        # ----------------------------------------------------
-        # Rasio sumbu
-        # ----------------------------------------------------
+        # ====================================================
+        # CEK PERIMETER ELLIPSE
+        # ====================================================
 
-        ratio = minor / major
+        perimeter = cv2.arcLength(
+            contour,
+            True
+        )
 
-        # Terlalu pipih -> bukan ellipse yang kita cari
-        if ratio < 0.35:
+        if perimeter <= 0:
             continue
-
-        # Hampir lingkaran -> lebih cocok dimasukkan
-        # sebagai lingkaran
-        if ratio > 0.92:
-            continue
-
-        # ----------------------------------------------------
-        # Bounding box
-        # ----------------------------------------------------
-
-        x, y, w, h = cv2.boundingRect(contour)
-
-        if w < 70 or h < 40:
-            continue
-
-        # ----------------------------------------------------
-        # Hitung kecocokan contour terhadap ellipse
-        # ----------------------------------------------------
-
-        # Jika width < height, arah sumbu utama harus
-        # diputar 90 derajat.
-        if width >= height:
-            ellipse_angle = angle
-        else:
-            ellipse_angle = angle + 90
-
-        theta = np.radians(
-            ellipse_angle
-        )
-
-        cos_theta = np.cos(theta)
-        sin_theta = np.sin(theta)
-
-        points = contour[:, 0, :].astype(
-            np.float32
-        )
-
-        dx = points[:, 0] - cx
-        dy = points[:, 1] - cy
-
-        # Rotasi koordinat ke sistem ellipse
-        x_rot = (
-            dx * cos_theta +
-            dy * sin_theta
-        )
-
-        y_rot = (
-            -dx * sin_theta +
-            dy * cos_theta
-        )
 
         a = major / 2
         b = minor / 2
 
-        nilai = (
-            (x_rot / a) ** 2 +
-            (y_rot / b) ** 2
-        )
-
-        # Titik yang tepat berada di ellipse
-        # akan menghasilkan nilai mendekati 1.
-        error = np.mean(
-            np.abs(nilai - 1)
-        )
-
-        # Jangan terlalu ketat.
-        if error > 0.60:
-            continue
-
-        candidates.append(
-            (
-                ellipse,
-                area,
-                error
+        ellipse_perimeter = np.pi * (
+            3 * (a + b)
+            - np.sqrt(
+                (3 * a + b)
+                * (a + 3 * b)
             )
         )
 
-    # --------------------------------------------------------
-    # Urutkan berdasarkan kecocokan terbaik
-    # --------------------------------------------------------
+        if ellipse_perimeter <= 0:
+            continue
+
+        perimeter_error = abs(
+            perimeter - ellipse_perimeter
+        ) / ellipse_perimeter
+
+        if perimeter_error > 0.35:
+            continue
+
+        # ====================================================
+        # CEK LUAS ELLIPSE
+        # ====================================================
+
+        ellipse_area = np.pi * a * b
+
+        if ellipse_area <= 0:
+            continue
+
+        area_error = abs(
+            area - ellipse_area
+        ) / ellipse_area
+
+        if area_error > 0.45:
+            continue
+
+        # ====================================================
+        # CEK RASIO BOUNDING BOX
+        # ====================================================
+
+        bbox_ratio = min(w, h) / max(w, h)
+
+        if bbox_ratio < 0.30:
+            continue
+
+        # ====================================================
+        # FILTER PERSEGI PANJANG
+        # ====================================================
+
+        # Membuat bounding rectangle yang dapat berputar.
+        # Dengan cara ini, objek yang miring seperti HP
+        # tetap dapat dikenali sebagai bentuk persegi panjang.
+        rotated_rect = cv2.minAreaRect(contour)
+
+        rect_width, rect_height = rotated_rect[1]
+
+        if rect_width <= 0 or rect_height <= 0:
+            continue
+
+        rect_area = rect_width * rect_height
+
+        # Mengukur seberapa penuh kontur mengisi
+        # persegi panjang tersebut.
+        rectangularity = area / rect_area
+
+        # Persegi panjang seperti HP biasanya memiliki
+        # nilai rectangularity yang tinggi.
+        if rectangularity > 0.88:
+            continue
+
+        # ====================================================
+        # SCORE
+        # ====================================================
+
+        score = (
+            perimeter_error
+            + area_error
+        )
+
+        candidates.append(
+            (
+                score,
+                ellipse
+            )
+        )
 
     candidates.sort(
-        key=lambda item: item[2]
+        key=lambda item: item[0]
     )
 
-    hasil = []
+    result = []
 
-    for ellipse, area, error in candidates:
+    for score, ellipse in candidates:
 
         (cx, cy), (width, height), angle = ellipse
 
         terlalu_dekat = False
 
-        for existing in hasil:
+        for existing in result:
 
-            (ex, ey), _, _ = existing
+            (ex, ey), (ew, eh), ea = existing
 
-            jarak = np.sqrt(
-                (cx - ex) ** 2 +
-                (cy - ey) ** 2
+            distance = np.sqrt(
+                (cx - ex) ** 2
+                + (cy - ey) ** 2
             )
 
-            if jarak < 70:
+            min_distance = (
+                min(width, height)
+                + min(ew, eh)
+            ) * 0.35
+
+            if distance < min_distance:
                 terlalu_dekat = True
                 break
 
-        if not terlalu_dekat:
-            hasil.append(
-                ellipse
-            )
+        if terlalu_dekat:
+            continue
 
-        if len(hasil) >= 3:
+        result.append(ellipse)
+
+        if len(result) >= MAX_ELLIPSES:
             break
 
-    return hasil
+    return result
 
 def draw_ellipses(result, ellipses):
 
@@ -592,49 +630,24 @@ def draw_ellipses(result, ellipses):
 # PROSES UTAMA
 # ============================================================
 
-def process_image(image):
 
+def process_image(image):
     result = image.copy()
 
-    # Preprocessing biasa
-    # untuk garis dan lingkaran
     gray, edges = preprocess(image)
-
-    # Preprocessing khusus ellipse
-    # menggunakan CLAHE
     gray_ellipse, edges_ellipse = preprocess_ellipse(image)
 
-    # Deteksi masing-masing bentuk
     lines = detect_lines(edges)
     circles = detect_circles(gray)
     ellipses = detect_ellipses(edges_ellipse)
 
-    # Gambar hasil garis
-    line_count = draw_lines(
-        result,
-        lines
-    )
+    line_count = draw_lines(result, lines)
+    circle_count = draw_circles(result, circles)
+    ellipse_count = draw_ellipses(result, ellipses)
 
-    # Gambar hasil lingkaran
-    circle_count = draw_circles(
-        result,
-        circles
-    )
+    return (result, gray, edges, line_count, circle_count, ellipse_count)
 
-    # Gambar hasil ellipse
-    ellipse_count = draw_ellipses(
-        result,
-        ellipses
-    )
 
-    return (
-        result,
-        gray,
-        edges,
-        line_count,
-        circle_count,
-        ellipse_count
-    )
 
 # ============================================================
 # GUI
@@ -661,7 +674,7 @@ class Application:
 
         title = tk.Label(
             root,
-            text="Deteksi Objek Berbasis Garis, Lingkaran, dan Ellipse",
+            text="Deteksi Objek Berbasis Garis, Lingkaran, Ellipse",
             font=("Arial", 18, "bold")
         )
 
@@ -905,13 +918,9 @@ class Application:
             )
 
             self.status.configure(
-                text=(
-                    f"Hasil: "
-                    f"{line_count} garis | "
-                    f"{circle_count} lingkaran | "
-                    f"{ellipse_count} ellipse"
+                 text=f"Hasil: {line_count} garis | {circle_count} lingkaran | {ellipse_count} ellipse"
                 )
-            )
+            
 
         except Exception as error:
 
